@@ -5,8 +5,9 @@ from typing import Optional
 
 from GameNetwork import GameNetwork
 
-NUM_ITERATIONS = 800  # Number of PUCT iterations per move
+NUM_ITERATIONS = 500  # Number of PUCT iterations per move
 PRETRAIN_WEIGHTS_PATH = "5x5_pretrain.weights.h5"
+ACTION_SIZE = BOARD_SIZE * BOARD_SIZE * 2  # Each cell can have 'S' or 'O'
 
 
 def move_to_action_index(move):
@@ -37,7 +38,7 @@ class PUCTPlayer:
     def PUCT(self, node, board):
         return board.current_player * node.Q + self.C * node.P * np.sqrt(node.parent.N) / (1 + node.N)
 
-    def choose_move(self, board, iterations):
+    def choose_move(self, board, iterations, is_self_play=False):
         self.root = PUCTNode()
 
         for _ in range(iterations):
@@ -58,9 +59,26 @@ class PUCTPlayer:
         # Choose the move with the highest visit count
         if not self.root.children:
             return None
+        
+        if is_self_play:
+            return self.root_policy_distribution()
 
         best_child = max(self.root.children, key=lambda c: c.N)
         return self.root.children[best_child]
+
+    def root_policy_distribution(self) -> np.ndarray:
+        """Return visit-count distribution over all actions from the current root."""
+        counts = np.zeros(ACTION_SIZE, dtype=np.float32)
+        total = 0.0
+        for child, move in self.root.children.items():
+            idx = move_to_action_index(move)
+            counts[idx] = child.N
+            total += child.N
+        if total > 0:
+            counts /= total
+        else:
+            counts.fill(1.0 / ACTION_SIZE)
+        return counts
 
     def selection(self, board):
         cur = self.root
