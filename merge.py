@@ -1,59 +1,101 @@
 import numpy as np
 from pathlib import Path
 
-# -------------------- EDIT THESE 4 PATHS --------------------
-sources = [
-    "250_games.npz",      # .npz
-    "mcts_dataset_merged.npz",      # .npz
-    "mcts_dataset_merged_1725_seed_0.npz",        # folder with states.npy, policies.npy, values.npy, board_size.npy, action_size.npy
-    "mcts_dataset_merged_1000_seed_1.npz",        # folder with the same 5 .npy files
-]
-merged = Path("combined_all.npz")
-# ------------------------------------------------------------
-
 REQUIRED_KEYS = ["states", "policies", "values", "board_size", "action_size"]
+out_path = Path("combined_all.npz")
+search_root = Path("..").resolve()
 
-def load_policies(src: str):
+
+def discover_sources(root: Path, output_file: Path):
+    npz_sources = sorted(
+        p for p in root.glob("*.npz")
+        if p.is_file() and p.name != output_file.name
+    )
+    if npz_sources:
+        return [str(p) for p in npz_sources]
+
+    dir_sources = sorted(
+        p for p in root.iterdir()
+        if p.is_dir() and all((p / f"{k}.npy").is_file() for k in REQUIRED_KEYS)
+    )
+    if dir_sources:
+        return [str(p) for p in dir_sources]
+
+    raise ValueError(
+        f"No sources found in {root.resolve()}. "
+        "Expected .npz files or folders with states.npy, policies.npy, values.npy, board_size.npy, action_size.npy."
+    )
+
+def load_source(src: str):
     p = Path(src)
+
     if p.is_file() and p.suffix == ".npz":
         d = np.load(p, allow_pickle=False)
-        if "policies" not in d.files:
-            raise ValueError(f"{p} missing 'policies'")
-        return d["policies"], f"npz:{p.name}"
+        missing = [k for k in REQUIRED_KEYS if k not in d.files]
+        if missing:
+            raise ValueError(f"{p} is missing keys: {missing}")
+        item = {k: d[k] for k in REQUIRED_KEYS}
+        return item, f"npz:{p.name}"
 
     if p.is_dir():
-        f = p / "policies.npy"
-        if not f.exists():
-            raise ValueError(f"{p} missing policies.npy")
-        return np.load(f, allow_pickle=False), f"dir:{p.name}"
+        # folder containing .npy files
+        item = {}
+        for k in REQUIRED_KEYS:
+            f = p / f"{k}.npy"
+            if not f.exists():
+                raise ValueError(f"Folder {p} is missing {f.name}")
+            item[k] = np.load(f, allow_pickle=False)
+        return item, f"dir:{p.name}"
 
-    raise ValueError(f"Not found/unsupported: {src}")
+    raise ValueError(f"Source not found or unsupported: {src}")
 
-def pretty(n): return f"{n:,}"
+loaded = []
+sources = discover_sources(search_root, out_path)
+print("Using sources:", sources)
 
-# Per-source counts
-counts = []
-sum_rows = 0
-print("Per-source policy counts:")
-print("-" * 60)
 for s in sources:
-    pol, label = load_policies(s)
-    rows, cols = pol.shape
-    counts.append((label, rows, cols))
-    sum_rows += rows
-    print(f"{label:25s}  policies shape={pol.shape}  rows={pretty(rows)}")
+    item, label = load_source(s)
+    loaded.append((item, label))
 
-print("-" * 60)
-print("Sum of source policy rows:", pretty(sum_rows))
+# ---- Validate compatibility across all sources ----
+board_size0 = int(np.asarray(loaded[0][0]["board_size"]).item())
+action_size0 = int(np.asarray(loaded[0][0]["action_size"]).item())
 
-# Merged count
-m = np.load(merged, allow_pickle=False)
-merged_rows, merged_cols = m["policies"].shape
-print("Merged policies shape:", m["policies"].shape, "rows=", pretty(merged_rows))
+state_shape0   = loaded[0][0]["states"].shape[1:]
+policy_shape0  = loaded[0][0]["policies"].shape[1:]
+value_shape0   = loaded[0][0]["values"].shape[1:]
 
-# Check equals
-if merged_rows == sum_rows:
-    print("✅ OK: merged rows match sum of sources")
-else:
-    print("❌ MISMATCH: merged rows != sum of sources")
-    print("   Difference:", pretty(merged_rows - sum_rows))
+for item, label in loaded:
+    bs = int(np.asarray(item["board_size"]).item())
+    ac = int(np.asarray(item["action_size"]).item())
+
+    if bs != board_size0:
+        raise ValueError(f"{label}: board_size mismatch {bs} != {board_size0}")
+    if ac != action_size0:
+        raise ValueError(f"{label}: action_size mismatch {ac} != {action_size0}")
+    if item["states"].shape[1:] != state_shape0:
+        raise ValueError(f"{label}: states shape mismatch {item['states'].shape[1:]} != {state_shape0}")
+    if item["policies"].shape[1:] != policy_shape0:
+        raise ValueError(f"{label}: policies shape mismatch {item['policies'].shape[1:]} != {policy_shape0}")
+    if item["values"].shape[1:] != value_shape0:
+        raise ValueError(f"{label}: values shape mismatch {item['values'].shape[1:]} != {value_shape0}")
+
+# ---- Concatenate ----
+states   = np.concatenate([item["states"]   for item, _ in loaded], axis=0).astype(np.float32, copy=False)
+policies = np.concatenate([item["policies"] for item, _ in loaded], axis=0).astype(np.float32, copy=False)
+values   = np.concatenate([item["values"]   for item, _ in loaded], axis=0).astype(np.float32, copy=False)
+
+np.savez_compressed(
+    out_path,
+    states=states,
+    policies=policies,
+    values=values,
+    board_size=np.asarray(board_size0, dtype=np.int32),
+    action_size=np.asarray(action_size0, dtype=np.int32),
+)
+
+print("Saved combined dataset:", out_path)
+print("states:", states.shape, states.dtype)
+print("policies:", policies.shape, policies.dtype)
+print("values:", values.shape, values.dtype)
+print("board_size:", board_size0, "action_size:", action_size0)
